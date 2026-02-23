@@ -2,17 +2,39 @@ import logging
 import os
 import requests
 from datetime import date
+import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
 # ── Test guard ─────────────────────────────────────────────────────────────────
-# On the first test run we fetch only 1 page (250 stocks) via the screener.
-# Set to None to paginate through all pages.
-TEST_PAGE_LIMIT = 1  # set to None for full run
+# On the first test run we only process a small sample of large-cap stocks.
+# Set to None to run the full list.
+TEST_STOCK_SAMPLE = 20  # Test with 20 stocks (from a curated S&P 500 list)
 # ─────────────────────────────────────────────────────────────────────────────
 
-MIN_MARKET_CAP = 2_000_000_000   # $2B minimum market cap
-PAGE_SIZE      = 250             # FMP screener max per page
+# A curated list of large-cap, liquid stocks across sectors for testing/demo
+LARGE_CAP_SYMBOLS = [
+    # Tech
+    "AAPL", "MSFT", "GOOGL", "META", "NVDA", "TSLA", "AMD", "INTEL",
+    # Finance
+    "JPM", "BAC", "WFC", "GS", "BLK",
+    # Healthcare
+    "JNJ", "PFE", "UNH", "LLY", "AZN",
+    # Industrials
+    "BA", "CAT", "GE", "HON",
+    # Energy
+    "XOM", "CVX", "COP",
+    # Consumer
+    "WMT", "KO", "PG", "JNJ", "MCD",
+    # Communications
+    "VZ", "T", "CMCSA",
+    # Utilities
+    "NEE", "DUK",
+    # Real Estate
+    "AMT", "PLD",
+    # Additional diversification
+    "ABBV", "COST", "CSCO", "CRM", "IBM", "INTC", "MA", "V",
+]
 
 
 def fetch_aa_yield(fred_api_key: str) -> tuple:
@@ -39,61 +61,44 @@ def fetch_aa_yield(fred_api_key: str) -> tuple:
     raise ValueError("No valid AA yield observations found in FRED response")
 
 
-def fetch_screener_page(fmp_api_key: str, offset: int) -> list:
+def fetch_stock_data(symbol: str) -> dict:
     """
-    Fetch one page of large-cap NYSE+NASDAQ stocks via the free stock-screener endpoint.
-    Returns a list of stock dicts, or an empty list if there are no more results.
+    Fetch stock info and latest price via yfinance (free, no API key needed).
+    Returns a dict with all available fields or None if fetch fails.
     """
-    url = "https://financialmodelingprep.com/api/v3/stock-screener"
-    params = {
-        "exchange":         "NYSE,NASDAQ",
-        "marketCapMoreThan": int(MIN_MARKET_CAP),
-        "country":          "US",
-        "limit":            PAGE_SIZE,
-        "offset":           offset,
-        "apikey":           fmp_api_key,
-    }
-    resp = requests.get(url, params=params, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    if isinstance(data, dict) and "Error Message" in data:
-        raise ValueError(f"FMP API error: {data['Error Message']}")
-    if not isinstance(data, list):
-        raise ValueError(f"Unexpected screener response type: {type(data)}")
-    return data
-
-
-def fetch_all_screener_stocks(fmp_api_key: str) -> list:
-    """
-    Paginate through the FMP stock screener to fetch all large-cap US stocks.
-    Respects TEST_PAGE_LIMIT if set.
-    """
-    all_stocks = []
-    page = 0
-    while True:
-        offset = page * PAGE_SIZE
-        logger.info(f"Fetching screener page {page} (offset={offset}) ...")
-        batch = fetch_screener_page(fmp_api_key, offset)
-        if not batch:
-            logger.info(f"No more results at page {page}. Done.")
-            break
-        all_stocks.extend(batch)
-        logger.info(f"  → {len(batch)} stocks (total so far: {len(all_stocks)})")
-        page += 1
-        if TEST_PAGE_LIMIT is not None and page >= TEST_PAGE_LIMIT:
-            logger.info(f"TEST_MODE: stopping after {TEST_PAGE_LIMIT} page(s)")
-            break
-    return all_stocks
+    try:
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        
+        # Extract key fields; yfinance returns None for missing fields
+        return {
+            "symbol": symbol,
+            "name": info.get("longName") or info.get("shortName") or "",
+            "sector": info.get("sector") or "",
+            "industry": info.get("industry") or "",
+            "marketCap": info.get("marketCap"),
+            "price": info.get("currentPrice"),
+            "trailingPE": info.get("trailingPE"),
+            "forwardPE": info.get("forwardPE"),
+            "beta": info.get("beta"),
+            "dividendRate": info.get("dividendRate") or 0.0,
+            "dividendYield": info.get("dividendYield") or 0.0,
+            "volume": info.get("volume") or 0.0,
+            "averageVolume": info.get("averageVolume") or 0.0,
+            "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh"),
+            "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow"),
+            "trailingEps": info.get("trailingEps"),
+        }
+    except Exception as e:
+        logger.warning(f"Failed to fetch yfinance data for {symbol}: {e}")
+        return None
 
 
 def main(spark):
     fred_api_key = os.environ.get("FRED_API_KEY")
-    fmp_api_key  = os.environ.get("FMP_API_KEY")
 
     if not fred_api_key:
         raise EnvironmentError("FRED_API_KEY environment variable is not set")
-    if not fmp_api_key:
-        raise EnvironmentError("FMP_API_KEY environment variable is not set")
 
     # ── Step 1: Fetch AA bond yield from FRED ────────────────────────────────
     aa_yield_pct, yield_date = fetch_aa_yield(fred_api_key)
@@ -101,18 +106,50 @@ def main(spark):
     max_pe = 1.0 / aa_yield_decimal
     logger.info(f"AA yield: {aa_yield_pct:.4f}% → Graham max P/E: {max_pe:.2f}")
 
-    # ── Step 2: Fetch all large-cap US stocks via the free screener ───────────
-    all_stocks = fetch_all_screener_stocks(fmp_api_key)
-    logger.info(f"Total candidate stocks fetched: {len(all_stocks)}")
+    # ── Step 2: Fetch stock data via yfinance ────────────────────────────────
+    symbols_to_check = LARGE_CAP_SYMBOLS
+    if TEST_STOCK_SAMPLE is not None:
+        symbols_to_check = LARGE_CAP_SYMBOLS[:TEST_STOCK_SAMPLE]
+        logger.info(f"TEST_MODE: checking {len(symbols_to_check)} stocks")
+    else:
+        logger.info(f"Full mode: checking {len(symbols_to_check)} stocks")
+
+    all_stocks = []
+    for sym in symbols_to_check:
+        logger.info(f"Fetching {sym} ...")
+        data = fetch_stock_data(sym)
+        if data:
+            all_stocks.append(data)
+    
+    logger.info(f"Successfully fetched data for {len(all_stocks)} stocks")
 
     # ── Step 3: Filter by Graham P/E criterion ────────────────────────────────
     qualified = []
     skipped_no_pe       = 0
     skipped_negative_pe = 0
     skipped_high_pe     = 0
+    skipped_small_cap   = 0
+    skipped_no_price    = 0
 
     for stock in all_stocks:
-        pe = stock.get("pe")
+        # Market cap filter (if available)
+        mkt_cap = stock.get("marketCap")
+        if mkt_cap is None:
+            skipped_small_cap += 1
+            logger.debug(f"{stock['symbol']}: skipped (no market cap)")
+            continue
+        if float(mkt_cap) < 2_000_000_000:  # $2B minimum
+            skipped_small_cap += 1
+            continue
+
+        # Price filter
+        price = stock.get("price")
+        if price is None or price == 0:
+            skipped_no_price += 1
+            continue
+
+        # P/E filter (use trailing P/E if available, else forward)
+        pe = stock.get("trailingPE") or stock.get("forwardPE")
         if pe is None:
             skipped_no_pe += 1
             continue
@@ -126,25 +163,28 @@ def main(spark):
             continue
         if pe >= max_pe:
             skipped_high_pe += 1
+            logger.debug(f"{stock['symbol']}: P/E {pe:.2f} ≥ {max_pe:.2f} (skipped)")
             continue
+
         qualified.append(stock)
 
     logger.info(
         f"Filter results: {len(qualified)} qualify | "
+        f"{skipped_small_cap} small-cap | {skipped_no_price} no price | "
         f"{skipped_no_pe} no P/E | {skipped_negative_pe} negative P/E | "
         f"{skipped_high_pe} P/E ≥ {max_pe:.2f}"
     )
 
     # ── Step 4: Build rows for Iceberg ───────────────────────────────────────
-    # The screener response includes: symbol, companyName, marketCap, price,
-    # beta, volume, lastAnnualDividend, exchange, sector, industry, country
     run_date = date.today().isoformat()
 
     rows = []
     for s in qualified:
-        price_val = float(s.get("price") or 0.0)
-        last_div  = float(s.get("lastAnnualDividend") or 0.0)
-        div_yield_pct = (last_div / price_val * 100.0) if price_val > 0 else 0.0
+        pe = float(s.get("trailingPE") or s.get("forwardPE") or 0.0)
+        price = float(s.get("price") or 0.0)
+        mkt_cap = float(s.get("marketCap") or 0.0)
+        div_yield_pct = float(s.get("dividendYield") or 0.0) * 100.0  # yfinance returns as decimal
+        beta = float(s.get("beta") or 0.0)
 
         rows.append({
             "run_date":       run_date,
@@ -152,18 +192,19 @@ def main(spark):
             "aa_yield_pct":   float(aa_yield_pct),
             "max_pe":         float(round(max_pe, 4)),
             "symbol":         str(s.get("symbol", "") or ""),
-            "company_name":   str(s.get("companyName", "") or ""),
-            "exchange":       str(s.get("exchangeShortName", "") or s.get("exchange", "") or ""),
+            "company_name":   str(s.get("name", "") or ""),
             "sector":         str(s.get("sector", "") or ""),
             "industry":       str(s.get("industry", "") or ""),
-            "country":        str(s.get("country", "") or ""),
-            "price":          price_val,
-            "pe_ratio":       float(s.get("pe") or 0.0),
-            "market_cap":     float(s.get("marketCap") or 0.0),
+            "price":          price,
+            "pe_ratio":       pe,
+            "market_cap":     mkt_cap,
             "volume":         float(s.get("volume") or 0.0),
-            "beta":           float(s.get("beta") or 0.0),
+            "avg_volume":     float(s.get("averageVolume") or 0.0),
+            "year_high":      float(s.get("fiftyTwoWeekHigh") or 0.0),
+            "year_low":       float(s.get("fiftyTwoWeekLow") or 0.0),
+            "beta":           beta,
             "dividend_yield": div_yield_pct,
-            "is_test_run":    TEST_PAGE_LIMIT is not None,
+            "is_test_run":    TEST_STOCK_SAMPLE is not None,
         })
 
     if not rows:
@@ -171,10 +212,10 @@ def main(spark):
         rows = [{
             "run_date": run_date, "yield_date": yield_date,
             "aa_yield_pct": float(aa_yield_pct), "max_pe": float(round(max_pe, 4)),
-            "symbol": "", "company_name": "NO_RESULTS", "exchange": "",
-            "sector": "", "industry": "", "country": "",
+            "symbol": "", "company_name": "NO_RESULTS", "sector": "", "industry": "",
             "price": 0.0, "pe_ratio": 0.0, "market_cap": 0.0,
-            "volume": 0.0, "beta": 0.0, "dividend_yield": 0.0, "is_test_run": True,
+            "volume": 0.0, "avg_volume": 0.0, "year_high": 0.0, "year_low": 0.0,
+            "beta": 0.0, "dividend_yield": 0.0, "is_test_run": True,
         }]
 
     from pyspark.sql.types import (
@@ -188,14 +229,15 @@ def main(spark):
         StructField("max_pe",         DoubleType(),  True),
         StructField("symbol",         StringType(),  True),
         StructField("company_name",   StringType(),  True),
-        StructField("exchange",       StringType(),  True),
         StructField("sector",         StringType(),  True),
         StructField("industry",       StringType(),  True),
-        StructField("country",        StringType(),  True),
         StructField("price",          DoubleType(),  True),
         StructField("pe_ratio",       DoubleType(),  True),
         StructField("market_cap",     DoubleType(),  True),
         StructField("volume",         DoubleType(),  True),
+        StructField("avg_volume",     DoubleType(),  True),
+        StructField("year_high",      DoubleType(),  True),
+        StructField("year_low",       DoubleType(),  True),
         StructField("beta",           DoubleType(),  True),
         StructField("dividend_yield", DoubleType(),  True),
         StructField("is_test_run",    BooleanType(), True),
@@ -208,5 +250,5 @@ def main(spark):
     logger.info(f"Wrote {count} qualifying stocks to analytics.graham_screener_results")
     logger.info(
         f"Summary — AA yield: {aa_yield_pct:.4f}% | Max P/E: {max_pe:.2f} | "
-        f"Qualifying stocks: {len(qualified)} | Test pages: {TEST_PAGE_LIMIT}"
+        f"Qualifying stocks: {len(qualified)} | Test sample: {TEST_STOCK_SAMPLE}"
     )
