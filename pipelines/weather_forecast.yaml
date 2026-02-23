@@ -1,0 +1,16 @@
+name: weather-forecast
+description: "Fetches 7-day weather forecasts for major cities via Open-Meteo API, stores results, and visualizes temperature and precipitation trends"
+
+tasks:
+  - name: fetch
+    type: python
+    function: functions/fetch_weather_forecast.py
+    entrypoint: main
+
+  - name: visualize
+    type: python
+    function: functions/visualize_weather_forecast.py
+    entrypoint: main
+    vizId: weather-forecast-dashboard
+    depends_on:
+      - fetch
