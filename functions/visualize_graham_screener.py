@@ -8,6 +8,7 @@ def main(spark):
     """
     Read today's Graham screener results and publish a multi-chart dashboard.
     Returns a list of viz specs for the platform vizId publisher.
+    Qualified stocks table appears first.
     """
     df = spark.table("analytics.graham_screener_results")
 
@@ -25,97 +26,104 @@ def main(spark):
     rows = df_today.collect()
 
     # ── Pull scalar metrics from first row ───────────────────────────────────
-    aa_yield  = round(rows[0]["aa_yield_pct"], 4) if rows else 0.0
-    max_pe    = round(rows[0]["max_pe"], 2)       if rows else 0.0
-    is_test   = rows[0]["is_test_run"]            if rows else False
+    aa_yield  = round(rows[0]["aa_yield_pct"], 4) if rows[0]["aa_yield_pct"] else 0
+    fair_pe   = round(rows[0]["fair_pe"], 2) if rows[0]["fair_pe"] else 0
 
-    # ── Chart 1: Metric cards ─────────────────────────────────────────────────
-    metrics = [
-        {"type": "metric", "title": "AA Bond Yield", "value": aa_yield, "unit": "%"},
-        {"type": "metric", "title": "Graham Max P/E",  "value": max_pe},
-        {"type": "metric", "title": "Qualifying Stocks", "value": total_count},
-    ]
-
-    # ── Chart 2: Qualifying stocks by sector (bar) ────────────────────────────
-    from collections import Counter
-    sector_counts = Counter(r["sector"] or "Unknown" for r in rows)
-    sector_data = [
-        {"sector": s, "count": c}
-        for s, c in sorted(sector_counts.items(), key=lambda x: -x[1])
-        if s  # skip blanks
-    ]
-    sector_bar = {
-        "type":  "bar",
-        "title": "Qualifying Stocks by Sector",
-        "data":  sector_data,
-        "xKey":  "sector",
-        "series": [{"key": "count", "label": "# Stocks", "color": "#3b82f6"}],
-    }
-
-    # ── Chart 3: P/E distribution (bar histogram buckets) ────────────────────
-    pe_buckets = Counter()
-    for r in rows:
-        pe = r["pe_ratio"]
-        if pe and pe > 0:
-            bucket = int(pe // 2) * 2  # 2-wide buckets: 0-2, 2-4, …
-            label = f"{bucket}–{bucket+2}"
-            pe_buckets[label] += 1
-
-    pe_data = [
-        {"bucket": k, "count": v}
-        for k, v in sorted(pe_buckets.items(), key=lambda x: float(x[0].split("–")[0]))
-    ]
-    pe_bar = {
-        "type":  "bar",
-        "title": f"P/E Distribution (max {max_pe})",
-        "data":  pe_data,
-        "xKey":  "bucket",
-        "series": [{"key": "count", "label": "# Stocks", "color": "#10b981"}],
-    }
-
-    # ── Chart 4: Top 30 by market cap — table ─────────────────────────────────
-    sorted_rows = sorted(rows, key=lambda r: r["market_cap"] or 0, reverse=True)[:30]
-    table_data = []
-    for r in sorted_rows:
-        row_dict = {
-            "symbol":        r["symbol"],
-            "company":       r["company_name"],
-            "sector":        r["sector"] or "",
-            "price":         round(r["price"] or 0, 2),
-            "pe_ratio":      round(r["pe_ratio"] or 0, 2),
-            "market_cap_b":  round((r["market_cap"] or 0) / 1e9, 2),
-            "beta":          round(r["beta"] or 0, 2),
-            "div_yield_pct": round((r["dividend_yield"] or 0), 4),
+    # ── Build qualified stocks table (sorted by discount) ──────────────────────
+    # Convert to dicts, sorted by discount_pct descending (most undervalued first)
+    stocks_table = [
+        {
+            "symbol": r["symbol"],
+            "price": round(float(r["current_price"]), 2),
+            "pe": round(float(r["pe_ratio"]), 2),
+            "fair_pe": round(float(r["fair_pe"]), 2),
+            "discount": round(float(r["discount_pct"]), 1),  # margin of safety %
+            "market_cap_b": round(float(r["market_cap"]) / 1e9, 1) if r["market_cap"] else None,
         }
-        # Include industry if it exists in the row
-        try:
-            industry = r["industry"]
-            if industry:
-                row_dict["industry"] = industry
-        except (IndexError, KeyError):
-            pass
-        table_data.append(row_dict)
+        for r in rows
+    ]
+    stocks_table.sort(key=lambda x: x["discount"], reverse=True)
 
-    table_columns = ["symbol", "company", "sector", "price",
-                     "pe_ratio", "market_cap_b", "beta", "div_yield_pct"]
-    if table_data and "industry" in table_data[0]:
-        table_columns.insert(3, "industry")
+    # ── Build bar chart: P/E vs Fair P/E ──────────────────────────────────────
+    chart_data = [
+        {
+            "symbol": s["symbol"],
+            "current_pe": s["pe"],
+            "fair_pe": s["fair_pe"],
+        }
+        for s in stocks_table[:20]  # Top 20 most undervalued
+    ]
 
-    table_chart = {
-        "type":    "table",
-        "title":   f"Top 30 Graham-Qualifying Stocks by Market Cap {'(TEST — 1 page)' if is_test else ''}",
-        "columns": table_columns,
-        "data":    table_data,
-    }
+    # ── Build market cap distribution ────────────────────────────────────────
+    mcap_data = [
+        {
+            "symbol": s["symbol"],
+            "market_cap_b": s["market_cap_b"] if s["market_cap_b"] else 0,
+        }
+        for s in stocks_table
+        if s["market_cap_b"]  # Only include if we have market cap data
+    ]
+    mcap_data.sort(key=lambda x: x["market_cap_b"], reverse=True)
+    mcap_data = mcap_data[:15]  # Top 15 by market cap
 
-    # ── Chart 5: Sector breakdown pie ────────────────────────────────────────
-    pie_data = [{"label": k, "value": v} for k, v in sector_counts.most_common(10) if k]
-    pie_chart = {
-        "type":  "pie",
-        "title": "Sector Mix (top 10)",
-        "data":  pie_data,
-    }
+    # ── Build visualizations in order ─────────────────────────────────────────
+    vizs = []
 
-    dashboard = metrics + [sector_bar, pe_bar, pie_chart, table_chart]
-    logger.info(f"Dashboard built: {len(dashboard)} panels")
-    return dashboard
+    # 1️⃣ QUALIFIED STOCKS TABLE (TOP) ───────────────────────────────────────────
+    vizs.append({
+        "type": "table",
+        "title": f"Graham-Qualified Stocks ({total_count} found)",
+        "description": f"Stocks with P/E below {fair_pe}x (AA yield: {aa_yield}%)",
+        "columns": ["symbol", "price", "pe", "fair_pe", "discount", "market_cap_b"],
+        "data": stocks_table,
+    })
+
+    # 2️⃣ Key Metrics ───────────────────────────────────────────────────────────
+    vizs.append({
+        "type": "metric",
+        "title": "Total Graham-Qualified Stocks",
+        "value": total_count,
+        "unit": "stocks",
+    })
+
+    vizs.append({
+        "type": "metric",
+        "title": "Fair P/E Ratio",
+        "value": fair_pe,
+        "unit": "x",
+    })
+
+    vizs.append({
+        "type": "metric",
+        "title": "AA Corporate Bond Yield",
+        "value": aa_yield,
+        "unit": "%",
+    })
+
+    # 3️⃣ P/E Comparison Chart ──────────────────────────────────────────────────
+    if chart_data:
+        vizs.append({
+            "type": "bar",
+            "title": "P/E vs Fair P/E (Top 20 Undervalued)",
+            "data": chart_data,
+            "xKey": "symbol",
+            "series": [
+                {"key": "current_pe", "label": "Current P/E", "color": "#ef4444"},
+                {"key": "fair_pe", "label": "Fair P/E", "color": "#10b981"},
+            ],
+        })
+
+    # 4️⃣ Market Cap Distribution ──────────────────────────────────────────────
+    if mcap_data:
+        vizs.append({
+            "type": "bar",
+            "title": "Market Cap Distribution (Top 15 by size)",
+            "data": mcap_data,
+            "xKey": "symbol",
+            "series": [
+                {"key": "market_cap_b", "label": "Market Cap (B)", "color": "#3b82f6"},
+            ],
+        })
+
+    logger.info(f"Built dashboard with {len(vizs)} visualizations")
+    return vizs
