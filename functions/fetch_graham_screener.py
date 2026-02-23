@@ -1,17 +1,20 @@
 import logging
 import os
 import requests
-from datetime import datetime, date
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
-# ── Test guard: set to True for first run, False for full run ──────────────────
-TEST_MODE = True
-TEST_PAGE_LIMIT = 1  # Only fetch 1 page (~250 stocks) on test run
+# ── Test guard ─────────────────────────────────────────────────────────────────
+# On the first test run we slice to TEST_STOCK_LIMIT stocks per exchange.
+# Set to None to run the full universe.
+TEST_STOCK_LIMIT = 200  # ~200 stocks per exchange for test run
 # ─────────────────────────────────────────────────────────────────────────────
 
+MIN_MARKET_CAP = 2_000_000_000  # $2B minimum market cap
 
-def fetch_aa_yield(fred_api_key: str) -> tuple[float, str]:
+
+def fetch_aa_yield(fred_api_key: str) -> tuple:
     """Fetch the latest ICE BofA AA US Corporate Index Effective Yield from FRED."""
     url = "https://api.stlouisfed.org/fred/series/observations"
     params = {
@@ -19,7 +22,7 @@ def fetch_aa_yield(fred_api_key: str) -> tuple[float, str]:
         "api_key": fred_api_key,
         "file_type": "json",
         "sort_order": "desc",
-        "limit": 5,  # get last 5 obs so we can skip any "." missing values
+        "limit": 5,
     }
     resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
@@ -35,43 +38,24 @@ def fetch_aa_yield(fred_api_key: str) -> tuple[float, str]:
     raise ValueError("No valid AA yield observations found in FRED response")
 
 
-def fetch_screener_page(fmp_api_key: str, page: int, market_cap_min: int = 2_000_000_000) -> list:
-    """Fetch one page of NYSE+NASDAQ stocks from FMP screener (250 per page)."""
-    url = "https://financialmodelingprep.com/api/v3/stock-screener"
-    params = {
-        "marketCapMoreThan": market_cap_min,
-        "isActivelyTrading": "true",
-        "exchange": "NYSE,NASDAQ",
-        "limit": 250,
-        "apikey": fmp_api_key,
-        "page": page,
-    }
-    resp = requests.get(url, params=params, timeout=60)
+def fetch_exchange_quotes(fmp_api_key: str, exchange: str) -> list:
+    """
+    Fetch all real-time quotes for a given exchange (NYSE or NASDAQ).
+    Each record includes price, pe, marketCap, volume, beta, etc.
+    This endpoint is available on the free FMP plan.
+    """
+    url = f"https://financialmodelingprep.com/api/v3/quotes/{exchange.lower()}"
+    params = {"apikey": fmp_api_key}
+    logger.info(f"Fetching all quotes for {exchange} ...")
+    resp = requests.get(url, params=params, timeout=120)
     resp.raise_for_status()
     data = resp.json()
     if isinstance(data, dict) and "Error Message" in data:
-        raise ValueError(f"FMP API error: {data['Error Message']}")
-    return data if isinstance(data, list) else []
-
-
-def fetch_all_screener_stocks(fmp_api_key: str) -> list:
-    """Paginate through FMP stock screener, respecting TEST_MODE limit."""
-    all_stocks = []
-    page = 0
-    while True:
-        if TEST_MODE and page >= TEST_PAGE_LIMIT:
-            logger.info(f"TEST_MODE: stopping after {TEST_PAGE_LIMIT} page(s)")
-            break
-        logger.info(f"Fetching screener page {page} ...")
-        batch = fetch_screener_page(fmp_api_key, page)
-        if not batch:
-            logger.info(f"Empty page {page} — done paginating")
-            break
-        all_stocks.extend(batch)
-        logger.info(f"  → {len(batch)} stocks on page {page}, total so far: {len(all_stocks)}")
-        page += 1
-
-    return all_stocks
+        raise ValueError(f"FMP API error on {exchange}: {data['Error Message']}")
+    if not isinstance(data, list):
+        raise ValueError(f"Unexpected response type for {exchange}: {type(data)}")
+    logger.info(f"  → {len(data)} total quotes for {exchange}")
+    return data
 
 
 def main(spark):
@@ -89,20 +73,42 @@ def main(spark):
     max_pe = 1.0 / aa_yield_decimal
     logger.info(f"AA yield: {aa_yield_pct:.4f}% → Graham max P/E: {max_pe:.2f}")
 
-    # ── Step 2: Fetch stocks from FMP screener ───────────────────────────────
-    all_stocks = fetch_all_screener_stocks(fmp_api_key)
-    logger.info(f"Total raw stocks fetched: {len(all_stocks)}")
+    # ── Step 2: Fetch full exchange quote dumps from FMP (free endpoints) ────
+    nyse_quotes   = fetch_exchange_quotes(fmp_api_key, "nyse")
+    nasdaq_quotes = fetch_exchange_quotes(fmp_api_key, "nasdaq")
 
-    if not all_stocks:
-        raise ValueError("FMP screener returned no stocks — check API key or plan limits")
+    all_quotes = nyse_quotes + nasdaq_quotes
 
-    # ── Step 3: Filter by Graham P/E criterion ───────────────────────────────
+    # Apply test limit if set
+    if TEST_STOCK_LIMIT is not None:
+        before = len(all_quotes)
+        all_quotes = all_quotes[:TEST_STOCK_LIMIT]
+        logger.info(
+            f"TEST_MODE: sliced from {before} → {len(all_quotes)} stocks "
+            f"(limit={TEST_STOCK_LIMIT})"
+        )
+
+    logger.info(f"Total quotes to evaluate: {len(all_quotes)}")
+
+    # ── Step 3: Filter by Graham P/E criterion + market cap ──────────────────
     qualified = []
-    skipped_no_pe = 0
+    skipped_no_pe       = 0
     skipped_negative_pe = 0
-    skipped_high_pe = 0
+    skipped_high_pe     = 0
+    skipped_small_cap   = 0
 
-    for stock in all_stocks:
+    for stock in all_quotes:
+        # Market cap filter
+        mkt_cap = stock.get("marketCap")
+        try:
+            mkt_cap = float(mkt_cap) if mkt_cap is not None else 0.0
+        except (ValueError, TypeError):
+            mkt_cap = 0.0
+        if mkt_cap < MIN_MARKET_CAP:
+            skipped_small_cap += 1
+            continue
+
+        # P/E filter
         pe = stock.get("pe")
         if pe is None:
             skipped_no_pe += 1
@@ -118,48 +124,52 @@ def main(spark):
         if pe >= max_pe:
             skipped_high_pe += 1
             continue
+
         qualified.append(stock)
 
     logger.info(
-        f"Filtering results: {len(qualified)} qualify | "
-        f"{skipped_no_pe} no P/E | {skipped_negative_pe} negative P/E | "
-        f"{skipped_high_pe} P/E too high (≥{max_pe:.2f})"
+        f"Filter results: {len(qualified)} qualify | "
+        f"{skipped_small_cap} small-cap | {skipped_no_pe} no P/E | "
+        f"{skipped_negative_pe} negative P/E | {skipped_high_pe} P/E ≥ {max_pe:.2f}"
     )
 
-    # ── Step 4: Build Spark DataFrame and save to Iceberg ───────────────────
+    # ── Step 4: Build rows for Iceberg ───────────────────────────────────────
     run_date = date.today().isoformat()
 
     rows = []
     for s in qualified:
+        # Determine exchange from the record itself (nyse/nasdaq mix)
+        exch = str(s.get("exchange", "") or "")
+
         rows.append({
             "run_date":        run_date,
             "yield_date":      yield_date,
             "aa_yield_pct":    float(aa_yield_pct),
             "max_pe":          float(round(max_pe, 4)),
-            "symbol":          str(s.get("symbol", "")),
-            "company_name":    str(s.get("companyName", "")),
-            "sector":          str(s.get("sector", "") or ""),
-            "industry":        str(s.get("industry", "") or ""),
-            "exchange":        str(s.get("exchangeShortName", "") or ""),
+            "symbol":          str(s.get("symbol", "") or ""),
+            "company_name":    str(s.get("name", "") or ""),
+            "exchange":        exch,
             "price":           float(s.get("price") or 0.0),
             "pe_ratio":        float(s.get("pe") or 0.0),
             "market_cap":      float(s.get("marketCap") or 0.0),
             "volume":          float(s.get("volume") or 0.0),
-            "beta":            float(s.get("beta") or 0.0),
-            "dividend_yield":  float(s.get("lastAnnualDividend") or 0.0),
-            "country":         str(s.get("country", "") or ""),
-            "is_test_run":     TEST_MODE,
+            "avg_volume":      float(s.get("avgVolume") or 0.0),
+            "year_high":       float(s.get("yearHigh") or 0.0),
+            "year_low":        float(s.get("yearLow") or 0.0),
+            "eps":             float(s.get("eps") or 0.0),
+            "shares_outstanding": float(s.get("sharesOutstanding") or 0.0),
+            "is_test_run":     TEST_STOCK_LIMIT is not None,
         })
 
     if not rows:
-        logger.warning("No stocks passed the Graham filter — writing empty result set")
+        logger.warning("No stocks passed the Graham filter — writing placeholder row")
         rows = [{
             "run_date": run_date, "yield_date": yield_date,
             "aa_yield_pct": float(aa_yield_pct), "max_pe": float(round(max_pe, 4)),
-            "symbol": "", "company_name": "NO_RESULTS", "sector": "",
-            "industry": "", "exchange": "", "price": 0.0, "pe_ratio": 0.0,
-            "market_cap": 0.0, "volume": 0.0, "beta": 0.0,
-            "dividend_yield": 0.0, "country": "", "is_test_run": TEST_MODE,
+            "symbol": "", "company_name": "NO_RESULTS", "exchange": "",
+            "price": 0.0, "pe_ratio": 0.0, "market_cap": 0.0,
+            "volume": 0.0, "avg_volume": 0.0, "year_high": 0.0, "year_low": 0.0,
+            "eps": 0.0, "shares_outstanding": 0.0, "is_test_run": True,
         }]
 
     from pyspark.sql.types import (
@@ -167,30 +177,31 @@ def main(spark):
     )
 
     schema = StructType([
-        StructField("run_date",       StringType(),  True),
-        StructField("yield_date",     StringType(),  True),
-        StructField("aa_yield_pct",   DoubleType(),  True),
-        StructField("max_pe",         DoubleType(),  True),
-        StructField("symbol",         StringType(),  True),
-        StructField("company_name",   StringType(),  True),
-        StructField("sector",         StringType(),  True),
-        StructField("industry",       StringType(),  True),
-        StructField("exchange",       StringType(),  True),
-        StructField("price",          DoubleType(),  True),
-        StructField("pe_ratio",       DoubleType(),  True),
-        StructField("market_cap",     DoubleType(),  True),
-        StructField("volume",         DoubleType(),  True),
-        StructField("beta",           DoubleType(),  True),
-        StructField("dividend_yield", DoubleType(),  True),
-        StructField("country",        StringType(),  True),
-        StructField("is_test_run",    BooleanType(), True),
+        StructField("run_date",           StringType(),  True),
+        StructField("yield_date",         StringType(),  True),
+        StructField("aa_yield_pct",       DoubleType(),  True),
+        StructField("max_pe",             DoubleType(),  True),
+        StructField("symbol",             StringType(),  True),
+        StructField("company_name",       StringType(),  True),
+        StructField("exchange",           StringType(),  True),
+        StructField("price",              DoubleType(),  True),
+        StructField("pe_ratio",           DoubleType(),  True),
+        StructField("market_cap",         DoubleType(),  True),
+        StructField("volume",             DoubleType(),  True),
+        StructField("avg_volume",         DoubleType(),  True),
+        StructField("year_high",          DoubleType(),  True),
+        StructField("year_low",           DoubleType(),  True),
+        StructField("eps",                DoubleType(),  True),
+        StructField("shares_outstanding", DoubleType(),  True),
+        StructField("is_test_run",        BooleanType(), True),
     ])
 
     df = spark.createDataFrame(rows, schema=schema)
     df.writeTo("analytics.graham_screener_results").createOrReplace()
 
-    logger.info(f"Wrote {df.count()} qualifying stocks to analytics.graham_screener_results")
+    count = df.count()
+    logger.info(f"Wrote {count} qualifying stocks to analytics.graham_screener_results")
     logger.info(
         f"Summary — AA yield: {aa_yield_pct:.4f}% | Max P/E: {max_pe:.2f} | "
-        f"Qualifying stocks: {len(qualified)} | Test mode: {TEST_MODE}"
+        f"Qualifying stocks: {len(qualified)} | Test limit: {TEST_STOCK_LIMIT}"
     )
