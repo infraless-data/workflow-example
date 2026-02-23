@@ -58,6 +58,34 @@ def fetch_exchange_quotes(fmp_api_key: str, exchange: str) -> list:
     return data
 
 
+def fetch_stock_profiles(fmp_api_key: str, symbols: list) -> dict:
+    """
+    Fetch company profiles in batches to get sector info.
+    FMP /profile/{symbol} endpoint — free plan supports comma-separated symbols.
+    Returns a dict of symbol -> profile dict.
+    """
+    profiles = {}
+    batch_size = 50
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i + batch_size]
+        joined = ",".join(batch)
+        url = f"https://financialmodelingprep.com/api/v3/profile/{joined}"
+        params = {"apikey": fmp_api_key}
+        try:
+            resp = requests.get(url, params=params, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list):
+                for p in data:
+                    sym = p.get("symbol", "")
+                    if sym:
+                        profiles[sym] = p
+        except Exception as e:
+            logger.warning(f"Profile fetch failed for batch starting at {i}: {e}")
+    logger.info(f"Fetched profiles for {len(profiles)} symbols")
+    return profiles
+
+
 def main(spark):
     fred_api_key = os.environ.get("FRED_API_KEY")
     fmp_api_key = os.environ.get("FMP_API_KEY")
@@ -133,32 +161,52 @@ def main(spark):
         f"{skipped_negative_pe} negative P/E | {skipped_high_pe} P/E ≥ {max_pe:.2f}"
     )
 
-    # ── Step 4: Build rows for Iceberg ───────────────────────────────────────
+    # ── Step 4: Fetch sector/profile data for qualifying symbols ─────────────
+    qualified_symbols = [s.get("symbol", "") for s in qualified if s.get("symbol")]
+    profiles = fetch_stock_profiles(fmp_api_key, qualified_symbols)
+
+    # ── Step 5: Build rows for Iceberg ───────────────────────────────────────
     run_date = date.today().isoformat()
 
     rows = []
     for s in qualified:
-        # Determine exchange from the record itself (nyse/nasdaq mix)
+        sym = str(s.get("symbol", "") or "")
+        profile = profiles.get(sym, {})
+
+        # dividend yield: FMP quotes have lastAnnualDividend / price; profiles have dividendYield
+        div_yield = profile.get("lastDiv", None)
+        price_val = float(s.get("price") or 0.0)
+        if div_yield is not None and price_val > 0:
+            try:
+                div_yield_pct = float(div_yield) / price_val * 100.0
+            except (ValueError, TypeError):
+                div_yield_pct = 0.0
+        else:
+            div_yield_pct = 0.0
+
         exch = str(s.get("exchange", "") or "")
 
         rows.append({
-            "run_date":        run_date,
-            "yield_date":      yield_date,
-            "aa_yield_pct":    float(aa_yield_pct),
-            "max_pe":          float(round(max_pe, 4)),
-            "symbol":          str(s.get("symbol", "") or ""),
-            "company_name":    str(s.get("name", "") or ""),
-            "exchange":        exch,
-            "price":           float(s.get("price") or 0.0),
-            "pe_ratio":        float(s.get("pe") or 0.0),
-            "market_cap":      float(s.get("marketCap") or 0.0),
-            "volume":          float(s.get("volume") or 0.0),
-            "avg_volume":      float(s.get("avgVolume") or 0.0),
-            "year_high":       float(s.get("yearHigh") or 0.0),
-            "year_low":        float(s.get("yearLow") or 0.0),
-            "eps":             float(s.get("eps") or 0.0),
+            "run_date":           run_date,
+            "yield_date":         yield_date,
+            "aa_yield_pct":       float(aa_yield_pct),
+            "max_pe":             float(round(max_pe, 4)),
+            "symbol":             sym,
+            "company_name":       str(s.get("name", "") or ""),
+            "exchange":           exch,
+            "sector":             str(profile.get("sector", "") or ""),
+            "price":              price_val,
+            "pe_ratio":           float(s.get("pe") or 0.0),
+            "market_cap":         float(s.get("marketCap") or 0.0),
+            "volume":             float(s.get("volume") or 0.0),
+            "avg_volume":         float(s.get("avgVolume") or 0.0),
+            "year_high":          float(s.get("yearHigh") or 0.0),
+            "year_low":           float(s.get("yearLow") or 0.0),
+            "eps":                float(s.get("eps") or 0.0),
             "shares_outstanding": float(s.get("sharesOutstanding") or 0.0),
-            "is_test_run":     TEST_STOCK_LIMIT is not None,
+            "beta":               float(profile.get("beta") or s.get("beta") or 0.0),
+            "dividend_yield":     div_yield_pct,
+            "is_test_run":        TEST_STOCK_LIMIT is not None,
         })
 
     if not rows:
@@ -167,9 +215,10 @@ def main(spark):
             "run_date": run_date, "yield_date": yield_date,
             "aa_yield_pct": float(aa_yield_pct), "max_pe": float(round(max_pe, 4)),
             "symbol": "", "company_name": "NO_RESULTS", "exchange": "",
-            "price": 0.0, "pe_ratio": 0.0, "market_cap": 0.0,
+            "sector": "", "price": 0.0, "pe_ratio": 0.0, "market_cap": 0.0,
             "volume": 0.0, "avg_volume": 0.0, "year_high": 0.0, "year_low": 0.0,
-            "eps": 0.0, "shares_outstanding": 0.0, "is_test_run": True,
+            "eps": 0.0, "shares_outstanding": 0.0, "beta": 0.0,
+            "dividend_yield": 0.0, "is_test_run": True,
         }]
 
     from pyspark.sql.types import (
@@ -184,6 +233,7 @@ def main(spark):
         StructField("symbol",             StringType(),  True),
         StructField("company_name",       StringType(),  True),
         StructField("exchange",           StringType(),  True),
+        StructField("sector",             StringType(),  True),
         StructField("price",              DoubleType(),  True),
         StructField("pe_ratio",           DoubleType(),  True),
         StructField("market_cap",         DoubleType(),  True),
@@ -193,6 +243,8 @@ def main(spark):
         StructField("year_low",           DoubleType(),  True),
         StructField("eps",                DoubleType(),  True),
         StructField("shares_outstanding", DoubleType(),  True),
+        StructField("beta",               DoubleType(),  True),
+        StructField("dividend_yield",     DoubleType(),  True),
         StructField("is_test_run",        BooleanType(), True),
     ])
 
