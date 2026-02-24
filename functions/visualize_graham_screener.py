@@ -1,7 +1,39 @@
 import logging
 from datetime import date
+import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+
+
+def get_company_name(symbol):
+    """Fetch company name for a given symbol."""
+    try:
+        ticker = yf.Ticker(symbol)
+        name = ticker.info.get('longName') or ticker.info.get('shortName') or symbol
+        return name
+    except Exception as e:
+        logger.debug(f"Failed to fetch name for {symbol}: {e}")
+        return symbol
+
+
+def fetch_company_names(symbols):
+    """Concurrently fetch company names for a list of symbols."""
+    names = {}
+    
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_symbol = {executor.submit(get_company_name, sym): sym for sym in symbols}
+        
+        for future in future_to_symbol:
+            symbol = future_to_symbol[future]
+            try:
+                name = future.result()
+                names[symbol] = name
+            except Exception as e:
+                logger.warning(f"Failed to get name for {symbol}: {e}")
+                names[symbol] = symbol
+    
+    return names
 
 
 def main(spark):
@@ -29,6 +61,11 @@ def main(spark):
 
     rows = df_today.collect()
 
+    # ── Fetch company names concurrently ──────────────────────────────────────
+    symbols = [row["symbol"] for row in rows]
+    logger.info(f"Fetching company names for {len(symbols)} stocks...")
+    company_names = fetch_company_names(symbols)
+
     # ── Pull scalar metrics from first row ───────────────────────────────────
     aa_yield = round(rows[0]["aa_yield_pct"], 4) if rows else 4.5
     fair_pe = round(rows[0]["fair_pe"], 2) if rows else 22.2
@@ -38,6 +75,7 @@ def main(spark):
     for row in rows:
         table_data.append({
             "symbol": row["symbol"],
+            "name": company_names.get(row["symbol"], row["symbol"]),
             "price": round(float(row["current_price"]), 2),
             "p_e": round(float(row["pe_ratio"]), 2),
             "eps": round(float(row["eps"]), 2) if row["eps"] else None,
@@ -65,7 +103,7 @@ def main(spark):
         {
             "type": "table",
             "title": f"Graham-Qualified Stocks ({total_count} found) — Sorted by Margin of Safety",
-            "columns": ["symbol", "price", "p_e", "eps", "margin_of_safety_pct", "market_cap_b"],
+            "columns": ["symbol", "name", "price", "p_e", "eps", "margin_of_safety_pct", "market_cap_b"],
             "data": table_data,
         },
 
