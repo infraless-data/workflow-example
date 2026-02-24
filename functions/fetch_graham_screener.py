@@ -35,13 +35,18 @@ LARGE_CAP_SYMBOLS = [
 
 def fetch_sp500_list():
     """
-    Fetch the full S&P 500 symbol list from Wikipedia via yfinance.
+    Fetch the full S&P 500 symbol list from Wikipedia.
     Returns a list of ticker symbols.
     """
     try:
         # Fetch S&P 500 constituents from Wikipedia
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-        response = requests.get(url, timeout=10)
+        
+        # Wikipedia requires a User-Agent header to avoid 403 Forbidden
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
         # Parse the HTML table
