@@ -1,10 +1,11 @@
 import logging
+import os
 import requests
 from datetime import date
 
 logger = logging.getLogger(__name__)
 
-# Using football-data.org free API (no key required for basic endpoints)
+# Using football-data.org API
 API_BASE = "https://api.football-data.org/v4"
 PREMIER_LEAGUE_ID = 2021  # Premier League code
 
@@ -14,18 +15,30 @@ def fetch_standings():
     Fetch current Premier League standings from football-data.org.
     Returns standings data and match statistics.
     """
+    api_key = os.environ.get("FOOTBALL_DATA_API_KEY")
+    
+    if not api_key:
+        logger.warning("FOOTBALL_DATA_API_KEY not set. Using fallback demo data.")
+        return None
+    
     try:
         url = f"{API_BASE}/competitions/{PREMIER_LEAGUE_ID}/standings"
+        headers = {
+            "X-Auth-Token": api_key
+        }
         
-        # Some endpoints allow a free tier, but we'll catch 403 and handle gracefully
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code == 403:
-            logger.warning("API requires authentication key. Using fallback demo data.")
+            logger.error("API key invalid or unauthorized. Check your FOOTBALL_DATA_API_KEY.")
+            return None
+        elif response.status_code == 429:
+            logger.error("Rate limit exceeded. Try again later.")
             return None
         
         response.raise_for_status()
         data = response.json()
+        logger.info(f"Successfully fetched live standings from football-data.org")
         return data
         
     except Exception as e:
@@ -33,10 +46,43 @@ def fetch_standings():
         return None
 
 
+def parse_live_standings(data):
+    """
+    Parse the football-data.org API response into our standardized format.
+    """
+    today = date.today().isoformat()
+    
+    teams_data = []
+    
+    # The API response has standings nested under 'standings' array
+    if "standings" in data and len(data["standings"]) > 0:
+        table = data["standings"][0]  # First table is the main league table
+        
+        for entry in table.get("table", []):
+            teams_data.append({
+                "position": entry.get("position"),
+                "team": entry.get("team", {}).get("name", "Unknown"),
+                "played": entry.get("playedGames", 0),
+                "won": entry.get("won", 0),
+                "drawn": entry.get("draw", 0),
+                "lost": entry.get("lost", 0),
+                "points": entry.get("points", 0),
+                "gf": entry.get("goalsFor", 0),
+                "ga": entry.get("goalsAgainst", 0),
+            })
+    
+    return {
+        "fetch_date": today,
+        "competition": data.get("competition", {}).get("name", "Premier League"),
+        "season": data.get("season", {}).get("currentMatchday", 2024),
+        "standings": teams_data
+    }
+
+
 def get_demo_standings():
     """
     Fallback demo data showing a realistic Premier League snapshot.
-    This is what we'll use since football-data.org free tier has limits.
+    This is what we'll use if the API is unavailable.
     """
     today = date.today().isoformat()
     
@@ -75,13 +121,22 @@ def get_demo_standings():
 def main(spark):
     """
     Fetch Premier League standings and store in Iceberg table.
+    Tries live API first, falls back to demo data if unavailable.
     """
     logger.info("Starting soccer standings fetch")
     
-    # Try live API, fall back to demo data
-    standings = fetch_standings()
-    if not standings:
-        logger.info("Using demo Premier League standings")
+    # Try live API
+    api_response = fetch_standings()
+    
+    if api_response:
+        try:
+            standings = parse_live_standings(api_response)
+            logger.info(f"Using live standings from football-data.org API")
+        except Exception as e:
+            logger.error(f"Failed to parse API response: {e}. Using demo data.")
+            standings = get_demo_standings()
+    else:
+        logger.info("Using fallback demo Premier League standings")
         standings = get_demo_standings()
     
     today = date.today().isoformat()
