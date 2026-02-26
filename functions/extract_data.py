@@ -37,7 +37,7 @@ def main(spark, source_table: str = "raw_transactions", dataset: str = "sales_da
     environment = conf.get("spark.workflow.environment", "development")
 
     logger.info(f"Configuration:")
-    logger.info(f"  Dataset: {dataset} test")
+    logger.info(f"  Dataset: {dataset}")
     logger.info(f"  Source Table: {source_table}")
     logger.info(f"  Execution ID: {execution_id}")
     logger.info(f"  Pipeline: {pipeline_name}")
