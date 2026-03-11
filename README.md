@@ -4,14 +4,10 @@ This is a template repository for the Serverless Workflow Orchestration Platform
 
 ## Quick Start
 
-### 1. Clone this repository
+### 1. Connect a repository
+Create a new repo based off of this in the UI.
 
-```bash
-git clone https://github.com/jakekirsch2/workflow-example.git {my-repo-name}
-cd {my-repo-name}
-git remote set-url origin https://github.com/{my-username}/{my-repo-name}.git
-git push -u origin main
-```
+Connect Repository -> Create New
 
 ### 2. Connect to the platform
 
