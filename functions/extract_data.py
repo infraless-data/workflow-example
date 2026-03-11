@@ -65,15 +65,15 @@ def main(spark, source_table: str = "raw_transactions", dataset: str = "sales_da
     df = spark.createDataFrame(data, columns)
 
     logger.info("Step 2: Writing to Iceberg table...")
-    df.writeTo(f"sales.{source_table}").createOrReplace()
+    df.writeTo(f"analytics.{source_table}").createOrReplace()
 
     row_count = df.count()
-    logger.info(f"Extraction completed: {row_count} records written to sales.{source_table}")
+    logger.info(f"Extraction completed: {row_count} records written to analytics.{source_table}")
 
     result = {
         "status": "success",
         "records_extracted": row_count,
-        "table": f"sales.{source_table}",
+        "table": f"analytics.{source_table}",
         "execution_id": execution_id,
     }
 
