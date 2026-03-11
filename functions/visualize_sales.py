@@ -33,13 +33,13 @@ def main(spark):
             region,
             SUM(total_revenue)  AS revenue,
             SUM(total_orders)   AS orders
-        FROM sales.sales_summary
+        FROM analytics.sales_summary
         GROUP BY region
         ORDER BY revenue DESC
     """)
 
     rows = region_df.collect()
-    logger.info(f"Loaded {len(rows)} regions from sales.sales_summary")
+    logger.info(f"Loaded {len(rows)} regions from analytics.sales_summary")
 
     chart_data = [
         {

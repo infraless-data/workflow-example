@@ -41,8 +41,8 @@ def main(spark):
     logger.info(f"  Environment: {environment}")
 
     # Read from the Iceberg table created by the extract step
-    logger.info("Step 1: Reading from sales.raw_transactions...")
-    df = spark.table("sales.raw_transactions")
+    logger.info("Step 1: Reading from analytics.raw_transactions...")
+    df = spark.table("analytics.raw_transactions")
     input_count = df.count()
     logger.info(f"  Read {input_count} records")
 
@@ -62,8 +62,8 @@ def main(spark):
     """)
 
     # Write transformed data to Iceberg table
-    logger.info("Step 3: Writing to sales.sales_summary...")
-    transformed.writeTo("sales.sales_summary").createOrReplace()
+    logger.info("Step 3: Writing to analytics.sales_summary...")
+    transformed.writeTo("analytics.sales_summary").createOrReplace()
 
     output_count = transformed.count()
     logger.info(f"Transformation completed: {input_count} -> {output_count} records")
@@ -74,7 +74,7 @@ def main(spark):
             SUM(total_revenue) as total_revenue,
             SUM(total_orders) as total_orders,
             COUNT(DISTINCT region) as unique_regions
-        FROM sales.sales_summary
+        FROM analytics.sales_summary
     """).collect()[0]
 
     result = {

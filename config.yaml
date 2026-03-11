@@ -1,7 +1,6 @@
 python_version: "3.11"
 
 schemas:
-  - sales
   - analytics
 #most common pip_packages are already included in the base image, test before adding
 pip_packages: []
