@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Workflow Platform - Local Development CLI
+Infraless Data - Local Development CLI
 
 Run functions against real data via the platform API.
 Requires Python 3.7+ and the `requests` library.
@@ -63,12 +63,12 @@ def get_config(args):
 
     env = load_env(env_file)
 
-    api_url = env.get("WORKFLOW_API_URL")
-    api_key = env.get("WORKFLOW_API_KEY")
-    repo_id = env.get("WORKFLOW_REPO_ID")
+    api_url = env.get("INFRALESS_API_URL")
+    api_key = env.get("INFRALESS_API_KEY")
+    repo_id = env.get("INFRALESS_REPO_ID")
 
     if not api_url or not api_key or not repo_id:
-        print(f"Error: {env_file} must contain WORKFLOW_API_URL, WORKFLOW_API_KEY, and WORKFLOW_REPO_ID")
+        print(f"Error: {env_file} must contain INFRALESS_API_URL, INFRALESS_API_KEY, and INFRALESS_REPO_ID")
         sys.exit(1)
 
     if api_key == "wf_paste_your_key_here":
@@ -80,7 +80,7 @@ def get_config(args):
         "api_url": api_url.rstrip("/"),
         "api_key": api_key,
         "repo_id": repo_id,
-        "environment": env.get("WORKFLOW_ENVIRONMENT", environment),
+        "environment": env.get("INFRALESS_ENVIRONMENT", environment),
     }
 
 
@@ -172,7 +172,7 @@ def cmd_run(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Workflow Platform - Local Development CLI",
+        description="Infraless Data - Local Development CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--env", default=None, help="Environment: development (default) or production")
