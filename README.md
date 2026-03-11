@@ -1,6 +1,6 @@
-# Workflow Example Repository
+# Infraless Data — Example Repository
 
-This is a template repository for the Serverless Workflow Orchestration Platform. Define your data pipelines in YAML, write Python functions, and let the platform handle deployment and execution on Dataproc Serverless.
+This is a template repository for [Infraless Data](https://infralessdata.com). Define your data pipelines in YAML, write Python functions, and let the platform handle deployment and execution — no infrastructure required.
 
 ## Quick Start
 
@@ -9,14 +9,12 @@ Create a new repo based off of this in the UI.
 
 Connect Repository -> Create New
 
-### 2. Connect to the platform
+### 2. Build pipelines with the AI agent or locally
 
-- Go to the platform dashboard
-- Sign in with GitHub
-- Connect your cloned repository
-- The platform will automatically deploy your pipelines
+- Use the **Agent** tab to describe what you want — it will write and deploy pipelines for you
+- Or edit `pipelines/` and `functions/` directly in your local editor and push to deploy
 
-### 3. Make changes and push
+### 3. Push to deploy
 
 Edit your pipeline or functions, then push to trigger a redeploy:
 
@@ -38,7 +36,7 @@ The platform automatically deploys to different environments based on your branc
 ## Repository Structure
 
 ```
-workflow-example/
+your-repo/
 ├── config.yaml                # Repo-level config (Python version, schemas)
 ├── dev.py                     # Local development CLI
 ├── pipelines/                 # Pipeline definitions (YAML)
@@ -250,10 +248,10 @@ pip install requests
 3. Open `.env.development` and paste your API key:
 
 ```
-WORKFLOW_API_URL=https://your-platform.example.com
-WORKFLOW_API_KEY=wf_your_actual_key_here
-WORKFLOW_REPO_ID=abc123
-WORKFLOW_ENVIRONMENT=development
+INFRALESS_API_URL=https://infralessdata.com
+INFRALESS_API_KEY=wf_your_actual_key_here
+INFRALESS_REPO_ID=abc123
+INFRALESS_ENVIRONMENT=development
 ```
 
 ### Running a function
@@ -292,12 +290,13 @@ No GCP SDK, no `gcloud`, no Spark installation needed locally. Everything goes t
 
 ## Platform Features
 
-- **Auto-deploy**: Push to GitHub and pipelines are automatically redeployed
+- **AI agent**: Describe what you want and the agent writes, deploys, and monitors pipelines for you
+- **Auto-deploy**: Push to GitHub and pipelines are automatically redeployed in seconds
 - **Scheduling**: Run pipelines on a cron schedule
 - **Manual triggers**: Run pipelines on-demand from the dashboard, or run a single task in isolation
 - **Real-time logs**: View execution logs as they happen
-- **Cost tracking**: Monitor Dataproc usage and costs per execution
+- **Cost tracking**: Monitor compute usage and costs per execution
 - **Environment variables**: Securely store and inject secrets
-- **Local dev CLI**: Test functions and query data without deploying
-- **Iceberg lakehouse**: Tables stored in GCS with full schema evolution support
+- **Local dev CLI**: Test functions against real data without deploying
+- **Iceberg lakehouse**: Query Apache Iceberg tables with no infrastructure to manage
 - **Visualizations**: Publish shareable charts and dashboards from any task — no login required to view
