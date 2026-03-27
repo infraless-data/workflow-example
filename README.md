@@ -70,7 +70,7 @@ pip_packages: []
 | `schemas` | `[]` | Iceberg namespace names for your lakehouse tables |
 | `pip_packages` | `[]` | Additional PyPI packages to install (e.g. `["pandas==2.2.0", "httpx"]`) |
 
-Compute resources are managed automatically by Dataproc Serverless — no CPU/memory configuration needed.
+By default, tasks run on local Spark with no spin-up time. Set `increased_resources: true` on a pipeline to use distributed Spark for large-scale jobs.
 
 ## Pipeline Definition
 
@@ -105,7 +105,26 @@ tasks:
 | `name` | Pipeline identifier (lowercase, hyphens) |
 | `description` | Human-readable description |
 | `schedule` | Cron expression for scheduled runs (optional) |
+| `increased_resources` | Set `true` to run on distributed Spark. Default uses local Spark — fast startup, no spin-up time (optional) |
 | `tasks` | List of tasks to execute |
+
+### Execution Mode
+
+By default, pipelines run on **local Spark** — no spin-up time, lower cost, ideal for most jobs.
+
+For large datasets or long-running workloads, add `increased_resources: true` to your pipeline to run on **distributed Spark** instead:
+
+```yaml
+name: heavy-etl
+description: "Large-scale data processing"
+increased_resources: true
+
+tasks:
+  - name: process_large_dataset
+    ...
+```
+
+If a job fails with an out-of-memory or timeout error, the error message will tell you to set this flag.
 
 ### Task Fields
 
