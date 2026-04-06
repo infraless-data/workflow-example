@@ -1,87 +1,51 @@
-#!/usr/bin/env python3
 """
-Extract Data Function (Demo Stub)
-Demonstrates the extraction step of the ETL pipeline.
-
-Functions receive a SparkSession as the first argument, followed by
-any additional arguments from the pipeline YAML definition.
+Extract Data Function
+Generates sample sales data and writes it to BigQuery.
 """
 
-import json
 import logging
 from datetime import datetime, timedelta
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
-def main(spark, source_table: str = "raw_transactions", dataset: str = "sales_data"):
+def main(bq, gcs, source_table: str = "raw_transactions", **context):
     """
-    Main entry point for the extraction function.
+    Extract raw sales data into BigQuery.
 
     Args:
-        spark: SparkSession with Iceberg catalog configured
-        source_table: The source table to extract from
-        dataset: The dataset name to use
+        bq: google.cloud.bigquery.Client — authenticated as this repo's service account
+        gcs: google.cloud.storage.Client — authenticated as this repo's service account
+        source_table: destination table name in BigQuery
+        **context: dataset_id, environment, execution_id, pipeline_name, task_name, project_id
     """
-    logger.info("Starting data extraction (demo mode)")
+    import pandas as pd
+    from google.cloud import bigquery
 
-    # Get config from Spark properties (set by the platform)
-    conf = spark.sparkContext.getConf()
-    execution_id = conf.get("spark.workflow.executionId", "local-run")
-    pipeline_name = conf.get("spark.workflow.pipelineName", "daily_etl")
-    task_name = conf.get("spark.workflow.taskName", "extract")
-    environment = conf.get("spark.workflow.environment", "development")
+    dataset_id = context["dataset_id"]
+    table_ref = f"{dataset_id}.{source_table}"
 
-    logger.info(f"Configuration:")
-    logger.info(f"  Dataset: {dataset}")
-    logger.info(f"  Source Table: {source_table}")
-    logger.info(f"  Execution ID: {execution_id}")
-    logger.info(f"  Pipeline: {pipeline_name}")
-    logger.info(f"  Task: {task_name}")
-    logger.info(f"  Environment: {environment}")
+    logger.info(f"Extracting data to {table_ref} (env: {context['environment']})")
 
     # Simulate extraction window
     end_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     start_time = end_time - timedelta(days=1)
+    logger.info(f"Window: {start_time.date()} → {end_time.date()}")
 
-    logger.info(f"Extraction window: {start_time.isoformat()} to {end_time.isoformat()}")
-
-    # Create a sample Iceberg table using PySpark
-    logger.info("Step 1: Generating sample data...")
-
+    # Generate sample data
     data = [
-        (1, "2025-01-15", "us-east", "electronics", 142, 28450.00),
-        (2, "2025-01-15", "us-west", "electronics", 98, 19600.00),
-        (3, "2025-01-15", "us-east", "clothing", 215, 10750.00),
-        (4, "2025-01-15", "eu-west", "electronics", 76, 15200.00),
-        (5, "2025-01-15", "eu-west", "clothing", 134, 6700.00),
+        {"id": 1, "date": "2025-01-15", "region": "us-east", "category": "electronics", "orders": 142, "revenue": 28450.00},
+        {"id": 2, "date": "2025-01-15", "region": "us-west", "category": "electronics", "orders": 98,  "revenue": 19600.00},
+        {"id": 3, "date": "2025-01-15", "region": "us-east", "category": "clothing",    "orders": 215, "revenue": 10750.00},
+        {"id": 4, "date": "2025-01-15", "region": "eu-west", "category": "electronics", "orders": 76,  "revenue": 15200.00},
+        {"id": 5, "date": "2025-01-15", "region": "eu-west", "category": "clothing",    "orders": 134, "revenue":  6700.00},
     ]
-    columns = ["id", "date", "region", "category", "orders", "revenue"]
+    df = pd.DataFrame(data)
 
-    df = spark.createDataFrame(data, columns)
+    # Write to BigQuery
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    job = bq.load_table_from_dataframe(df, table_ref, job_config=job_config)
+    job.result()
 
-    logger.info("Step 2: Writing to Iceberg table...")
-    df.writeTo(f"analytics.{source_table}").createOrReplace()
-
-    row_count = df.count()
-    logger.info(f"Extraction completed: {row_count} records written to analytics.{source_table}")
-
-    result = {
-        "status": "success",
-        "records_extracted": row_count,
-        "table": f"analytics.{source_table}",
-        "execution_id": execution_id,
-    }
-
-    print(json.dumps(result, indent=2))
-    return result
-
-
-if __name__ == "__main__":
-    # Use dev.py for local testing:
-    #   python dev.py run functions/extract_data.py raw_transactions sales_data
-    print("Use 'python dev.py run functions/extract_data.py raw_transactions sales_data' for local testing")
+    logger.info(f"Wrote {len(df)} rows to {table_ref}")
+    return {"status": "success", "rows_written": len(df), "table": table_ref}

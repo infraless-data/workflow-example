@@ -7,7 +7,7 @@ This is a template repository for [Infraless Data](https://infralessdata.com). D
 ### 1. Connect a repository
 Create a new repo based off of this in the UI.
 
-Connect Repository -> Create New
+**Connect Repository → Create New**
 
 ### 2. Build pipelines with the AI agent or locally
 
@@ -16,70 +16,84 @@ Connect Repository -> Create New
 
 ### 3. Push to deploy
 
-Edit your pipeline or functions, then push to trigger a redeploy:
-
 ```bash
 git add .
 git commit -m "Update pipeline"
 git push
 ```
 
-### Branch-based Environments
-
-The platform automatically deploys to different environments based on your branch:
-
-| Branch | Environment |
-|--------|-------------|
-| `main` or `master` | Production |
-| `dev` or `develop` | Development |
+Every push automatically deploys all pipelines. If `functions/requirements.txt` changes, the platform rebuilds your Cloud Function with the new packages (takes 2–3 min on first build, ~30s for updates).
 
 ## Repository Structure
 
 ```
 your-repo/
-├── config.yaml                # Repo-level config (Python version, schemas)
-├── dev.py                     # Local development CLI
 ├── pipelines/                 # Pipeline definitions (YAML)
-│   └── daily_etl.yaml         # Example ETL pipeline
+│   └── daily_etl.yaml
 ├── functions/                 # Python functions
-│   ├── extract_data.py        # Data extraction
-│   ├── transform_sales.py     # Data transformation
-│   └── visualize_sales.py     # Publishes a shareable dashboard
+│   ├── requirements.txt       # Extra pip packages (optional)
+│   ├── extract_data.py
+│   ├── transform_sales.py
+│   └── visualize_sales.py
 └── README.md
 ```
 
-## Repository Configuration
+## Writing Python Functions
 
-The `config.yaml` file defines the Python version, Iceberg schemas, and pip packages for your repository.
+Functions receive a BigQuery client and a Cloud Storage client as the first two arguments, followed by any positional `args` from the pipeline YAML and keyword context:
 
-```yaml
-python_version: "3.11"
+```python
+# functions/extract_data.py
 
-schemas:
-  - sales
-  - analytics
+def main(bq, gcs, source_table: str, **context):
+    """
+    Args:
+        bq:  google.cloud.bigquery.Client  — authenticated as this repo's service account
+        gcs: google.cloud.storage.Client   — authenticated as this repo's service account
+        source_table: positional arg from pipeline YAML
+        **context: dataset_id, environment, execution_id, pipeline_name, task_name, project_id
+    """
+    import pandas as pd
+    from google.cloud import bigquery
 
-pip_packages: []
+    dataset_id = context["dataset_id"]  # e.g. "r_myrepo_prod"
+
+    df = pd.DataFrame([{"id": 1, "value": 100}])
+    job = bq.load_table_from_dataframe(
+        df, f"{dataset_id}.{source_table}",
+        job_config=bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE"),
+    )
+    job.result()
+    return {"rows_written": len(df)}
 ```
 
-### Config Fields
+Functions in the same repo can import each other:
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `python_version` | `"3.11"` | Python version (e.g. `"3.11"`, `"3.12"`) |
-| `schemas` | `[]` | Iceberg namespace names for your lakehouse tables |
-| `pip_packages` | `[]` | Additional PyPI packages to install (e.g. `["pandas==2.2.0", "httpx"]`) |
+```python
+# functions/transform.py
+from functions.helpers import clean_row   # works — all files are on sys.path
+```
 
-Compute resources are managed automatically by Dataproc Serverless — no CPU/memory configuration needed.
+### Package dependencies
+
+All packages your functions need must be listed in `functions/requirements.txt`. Edit it like any normal `requirements.txt`:
+
+```
+google-cloud-bigquery>=3.0
+pandas>=2.0
+scikit-learn
+httpx==0.27.0
+```
+
+Pushing a change to `requirements.txt` triggers a Cloud Function rebuild. The only package the platform always adds is `functions-framework` (the Cloud Function runtime) — everything else is up to you.
 
 ## Pipeline Definition
 
-Pipelines are defined in YAML files in the `pipelines/` directory:
-
 ```yaml
+# pipelines/daily_etl.yaml
 name: daily-etl
-description: Daily ETL pipeline example
-schedule: "0 6 * * *"  # 6 AM daily (cron format)
+description: "Daily sales ETL"
+schedule: "0 2 * * *"   # 2 AM daily (cron format, UTC)
 
 tasks:
   - name: extract
@@ -87,8 +101,7 @@ tasks:
     function: functions/extract_data.py
     entrypoint: main
     args:
-      - "raw_transactions"
-      - "sales_data"
+      - "raw_transactions"   # passed as source_table
 
   - name: transform
     type: python
@@ -96,207 +109,151 @@ tasks:
     entrypoint: main
     depends_on:
       - extract
-```
 
-### Pipeline Fields
-
-| Field | Description |
-|-------|-------------|
-| `name` | Pipeline identifier (lowercase, hyphens) |
-| `description` | Human-readable description |
-| `schedule` | Cron expression for scheduled runs (optional) |
-| `tasks` | List of tasks to execute |
-
-### Task Fields
-
-| Field | Description |
-|-------|-------------|
-| `name` | Task identifier |
-| `type` | Task type (`python`) |
-| `function` | Path to Python file |
-| `entrypoint` | Function to call (default: `main`) |
-| `args` | Arguments passed to the function (as positional args) |
-| `depends_on` | List of tasks that must complete first |
-| `vizId` | Publish the function's return value as a shareable visualization (optional) |
-
-## Writing Python Functions
-
-Functions receive a SparkSession as the first argument, followed by any `args` from the pipeline definition:
-
-```python
-# functions/extract_data.py
-
-def main(spark, source_table: str, dataset: str):
-    """
-    Called with args from pipeline:
-      args:
-        - "raw_transactions"   -> source_table
-        - "sales_data"         -> dataset
-    """
-    # Write to an Iceberg table
-    df = spark.createDataFrame([...], columns=[...])
-    df.writeTo(f"sales.{source_table}").createOrReplace()
-```
-
-## Visualizations
-
-Any task can publish a shareable chart or dashboard by adding `vizId` to its pipeline definition and returning a viz spec from the function.
-
-```yaml
-# pipelines/daily_etl.yaml
-tasks:
   - name: visualize
     type: python
     function: functions/visualize_sales.py
-    vizId: sales-dashboard        # <-- enables publishing
+    entrypoint: main
+    vizId: sales-dashboard   # publishes return value as a shareable chart
     depends_on:
       - transform
 ```
 
-The `vizId` becomes the public URL slug: `/v/{repoId}/{env}/sales-dashboard`.
+### Pipeline fields
 
-### Single chart
+| Field | Description |
+|-------|-------------|
+| `name` | Pipeline identifier (lowercase, hyphens) |
+| `schedule` | Cron expression for scheduled runs (optional) |
+| `tasks` | List of tasks |
 
-Return a dict with a `type` field and the platform publishes one chart:
+### Task fields
 
-```python
-def main(spark):
-    data = [{"month": r.month, "revenue": r.revenue} for r in df.collect()]
-    return {
-        "type": "bar",
-        "title": "Monthly Revenue",
-        "data": data,
-        "xKey": "month",
-        "series": [{"key": "revenue", "label": "Revenue ($)", "color": "#3b82f6"}],
-    }
+| Field | Description |
+|-------|-------------|
+| `name` | Task identifier |
+| `type` | `python` |
+| `function` | Path to Python file |
+| `entrypoint` | Function name to call (default: `main`) |
+| `args` | Positional args passed after `bq` and `gcs` |
+| `depends_on` | Tasks that must complete first |
+| `vizId` | Publish the function's return value as a shareable visualization |
+
+## Visualizations
+
+Add `vizId` to a task and return a viz spec from your function:
+
+```yaml
+- name: visualize
+  function: functions/visualize_sales.py
+  vizId: revenue-dashboard
 ```
 
-### Dashboard (multiple charts)
-
-Return a list and the platform publishes all charts together on one page:
-
 ```python
-def main(spark):
-    ...
+def main(bq, gcs, **context):
+    data = bq.query(f"SELECT region, revenue FROM `{context['dataset_id']}.sales_summary`").to_dataframe()
+    chart_data = data.to_dict("records")
+
+    # Return a dict for a single chart, or a list for a dashboard
     return [
-        {
-            "type": "metric",
-            "title": "Total Revenue",
-            "value": total_revenue,
-            "unit": "USD",
-        },
-        {
-            "type": "bar",
-            "title": "Revenue by Region",
-            "data": chart_data,
-            "xKey": "region",
-            "series": [{"key": "revenue", "label": "Revenue ($)", "color": "#3b82f6"}],
-        },
-        {
-            "type": "table",
-            "title": "Region Breakdown",
-            "columns": ["region", "revenue", "orders"],
-            "data": chart_data,
-        },
+        {"type": "metric", "title": "Total Revenue", "value": data["revenue"].sum(), "unit": "USD"},
+        {"type": "bar",    "title": "Revenue by Region", "data": chart_data,
+         "xKey": "region", "series": [{"key": "revenue", "label": "Revenue ($)", "color": "#3b82f6"}]},
+        {"type": "table",  "title": "Breakdown", "columns": ["region", "revenue"], "data": chart_data},
     ]
 ```
 
+The `vizId` becomes the public URL slug: `/v/{repoId}/{env}/revenue-dashboard`.
+
 ### Supported chart types
 
-| Type | Description | Required fields |
-|------|-------------|-----------------|
-| `bar` | Bar chart | `data`, `xKey`, `series` |
-| `line` | Line chart | `data`, `xKey`, `series` |
-| `pie` | Pie chart | `data`, `xKey`, `series` |
-| `table` | Data table | `data`, `columns` (optional) |
-| `metric` | Single number | `value`, `unit` (optional), `label` (optional) |
+| Type | Required fields |
+|------|-----------------|
+| `bar` | `data`, `xKey`, `series` |
+| `line` | `data`, `xKey`, `series` |
+| `pie` | `data`, `xKey`, `series` |
+| `table` | `data`, `columns` (optional) |
+| `metric` | `value`, `unit` (optional), `label` (optional) |
 
-All chart types support an optional `title` and `subtitle` field.
-
-Visualizations auto-refresh every minute and require no login to view.
+All types support optional `title` and `subtitle`. Visualizations auto-refresh every minute and require no login to view.
 
 ## Environment Variables
 
-Configure environment variables in the platform UI:
-
-1. Go to **Settings** > **Environment Variables**
-2. Select your repository and environment
-3. Add your variables (e.g., `API_KEY`, `DATABASE_URL`)
-
-Variables are securely stored and injected into your functions at runtime via `os.environ`:
+Store secrets in the UI: **Settings → Environment Variables**. They are injected into your functions at runtime via `os.environ`:
 
 ```python
 import os
 
-def main(spark):
-    api_key = os.environ.get("API_KEY")
-    database_url = os.environ.get("DATABASE_URL")
+def main(bq, gcs, **context):
+    api_key = os.environ["API_KEY"]
 ```
 
 ## Local Development
 
-The `dev.py` CLI lets you run functions against real data from your local machine. All execution happens on the platform via the API — you just need Python and the `requests` library.
+Run functions locally against real BigQuery data using your repo's service account.
 
-### Setup
+### 1. Get a local dev token
 
-```bash
-pip install requests
-```
-
-1. Go to **Settings** > **API Keys** and generate a new key
-2. Go to **Settings** > **Environment Variables**, select your repo, and click **Download .env.development**
-3. Open `.env.development` and paste your API key:
-
-```
-INFRALESS_API_URL=https://infralessdata.com
-INFRALESS_API_KEY=wf_your_actual_key_here
-INFRALESS_REPO_ID=abc123
-INFRALESS_ENVIRONMENT=development
-```
-
-### Running a function
+Go to **Settings → Local Dev** and click **Get Token**. Copy the `export` command shown — it generates a 1-hour access token for your repo's service account:
 
 ```bash
-# Run a function against development data
-python dev.py run functions/extract_data.py raw_transactions sales_data
-
-# Run against production data
-python dev.py run functions/transform_sales.py --env production
-
-# Use a different entrypoint
-python dev.py run functions/extract_data.py --entrypoint run_incremental
+export GOOGLE_CLOUD_ACCESS_TOKEN=ya29.c...
 ```
 
-Output streams as the job runs and prints logs on completion:
+### 2. Load your environment variables
 
-```
-Submitting functions/extract_data.py (development)...
-Running... 10s
-Running... 20s
-Running... 80s
+Download `.env.development` from **Settings → Environment Variables** and source it:
 
-── Logs ──
-INFO Loaded 1,240 rows from source
-INFO Wrote to sales.raw_transactions
-
-[✓] Success in 83s
+```bash
+set -a && source .env.development && set +a
 ```
 
-### How it works
+### 3. Install dependencies
 
-`dev.py run` reads your local Python file and submits it to the platform API, which runs it with the same Iceberg catalog and environment variables as production pipelines. The CLI polls for status every 10 seconds and prints logs when the job completes.
+```bash
+pip install google-cloud-bigquery google-cloud-storage pandas polars pyarrow db-dtypes
+# plus anything in functions/requirements.txt
+```
 
-No GCP SDK, no `gcloud`, no Spark installation needed locally. Everything goes through the API.
+### 4. Run locally
+
+```python
+# local_run.py  (don't commit this file)
+import os
+from google.cloud import bigquery, storage
+from functions.extract_data import main
+
+PROJECT_ID = "your-gcp-project-id"   # shown in Settings > Local Dev
+DATASET_ID = "r_yourrepoid_dev"       # shown in Settings > Local Dev
+
+bq  = bigquery.Client(project=PROJECT_ID)
+gcs = storage.Client(project=PROJECT_ID)
+
+context = {
+    "dataset_id":    DATASET_ID,
+    "environment":   "development",
+    "execution_id":  "local-test",
+    "pipeline_name": "manual",
+    "task_name":     "extract",
+    "project_id":    PROJECT_ID,
+}
+
+result = main(bq, gcs, "raw_transactions", **context)
+print(result)
+```
+
+The token expires after 1 hour — just get a fresh one from the UI when it does.
+
+> **Security**: Never commit `local_run.py` or the token. Add both to `.gitignore`.
 
 ## Platform Features
 
-- **AI agent**: Describe what you want and the agent writes, deploys, and monitors pipelines for you
-- **Auto-deploy**: Push to GitHub and pipelines are automatically redeployed in seconds
-- **Scheduling**: Run pipelines on a cron schedule
-- **Manual triggers**: Run pipelines on-demand from the dashboard, or run a single task in isolation
-- **Real-time logs**: View execution logs as they happen
-- **Cost tracking**: Monitor compute usage and costs per execution
-- **Environment variables**: Securely store and inject secrets
-- **Local dev CLI**: Test functions against real data without deploying
-- **Iceberg lakehouse**: Query Apache Iceberg tables with no infrastructure to manage
-- **Visualizations**: Publish shareable charts and dashboards from any task — no login required to view
+- **AI agent**: Describe what you want and the agent writes, deploys, and monitors pipelines
+- **Auto-deploy**: Push to GitHub — pipelines redeploy in seconds
+- **Scheduling**: Cron schedules per pipeline
+- **Manual triggers**: Run pipelines or individual tasks on-demand
+- **Real-time logs**: Stream execution output as it happens
+- **Cost tracking**: Per-execution compute cost tracking
+- **Environment variables**: Securely stored secrets injected at runtime
+- **BigQuery**: Tables live in a dedicated dataset per environment — query with standard SQL
+- **Visualizations**: Shareable charts and dashboards from any task — no login required
